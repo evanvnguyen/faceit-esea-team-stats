@@ -64,12 +64,12 @@
    * Returns:
    *   Promise<Array<object>> — all match history items.
    */
-  async function fetchPlayerHistory(playerId) {
+  async function fetchPlayerHistory(playerId, fromTimestamp) {
     const all = [];
     let offset = 0;
 
     while (true) {
-      const url =
+      let url =
         BASE +
         "/players/" +
         playerId +
@@ -77,11 +77,18 @@
         offset +
         "&limit=" +
         HISTORY_PAGE_SIZE;
-      const data = await throttledFetch(url);
-      const items = data.items || [];
-      all.push(...items);
-      if (items.length < HISTORY_PAGE_SIZE) break;
-      offset += HISTORY_PAGE_SIZE;
+      if (fromTimestamp) {
+        url += "&from=" + fromTimestamp;
+      }
+      try {
+        const data = await throttledFetch(url);
+        const items = data.items || [];
+        all.push(...items);
+        if (items.length < HISTORY_PAGE_SIZE) break;
+        offset += HISTORY_PAGE_SIZE;
+      } catch (e) {
+        break;
+      }
     }
 
     return all;

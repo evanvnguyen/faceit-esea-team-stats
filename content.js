@@ -44,8 +44,8 @@
    * Returns:
    *   Promise<Array<string>> — list of match IDs.
    */
-  async function findTeamMatches(playerId, teamName, competitionId) {
-    const history = await ESEA.api.fetchPlayerHistory(playerId);
+  async function findTeamMatches(playerId, teamName, competitionId, fromTimestamp) {
+    const history = await ESEA.api.fetchPlayerHistory(playerId, fromTimestamp);
     const target = teamName.toLowerCase();
     const matchIds = [];
 
@@ -141,9 +141,9 @@
    * Returns:
    *   Promise<Array<string>> — deduplicated match IDs for the team.
    */
-  async function findTeamMatchIds(players, teamName, competitionId) {
+  async function findTeamMatchIds(players, teamName, competitionId, fromTimestamp) {
     for (const player of players) {
-      const ids = await findTeamMatches(player.player_id, teamName, competitionId);
+      const ids = await findTeamMatches(player.player_id, teamName, competitionId, fromTimestamp);
       if (ids.length > 0) return ids;
     }
     return [];
@@ -229,10 +229,14 @@
     const subscriptions = await ESEA.api.fetchChampionshipSubscriptions(competitionId, teamNames);
     mergeSubstitutes(teams, subscriptions);
 
+    const FOUR_MONTHS_SEC = 4 * 30 * 24 * 60 * 60;
+    const matchStartedAt = matchData.started_at || matchData.configured_at || 0;
+    const fromTimestamp = matchStartedAt > 0 ? matchStartedAt - FOUR_MONTHS_SEC : 0;
+
     onProgress("Getting current season stats... (finding matches)");
     const teamMatchResults = await Promise.all(
       teams.map((team) =>
-        findTeamMatchIds(team.players, team.name, competitionId)
+        findTeamMatchIds(team.players, team.name, competitionId, fromTimestamp)
       )
     );
 

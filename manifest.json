@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ESEA Team Stats",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shows aggregated per-player stats for ESEA league teams on FACEIT match pages.",
   "host_permissions": ["https://open.faceit.com/*"],
   "content_scripts": [
