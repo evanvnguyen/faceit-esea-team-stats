@@ -6,7 +6,7 @@
   "host_permissions": ["https://open.faceit.com/*"],
   "content_scripts": [
     {
-      "matches": ["*://www.faceit.com/*/cs2/room/*"],
+      "matches": ["*://www.faceit.com/*"],
       "js": ["api.js", "content.js"],
       "css": ["styles.css"],
       "run_at": "document_idle"

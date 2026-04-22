@@ -70,13 +70,13 @@
   }
 
   /**
-   * Extract teams and rosters from match data.
+   * Extract team names and one player ID per team from match data.
    *
    * Args:
    *   matchData: object — match object from the API.
    *
    * Returns:
-   *   Array<{name: string, players: Array<{player_id: string, nickname: string}>}>
+   *   Array<{name: string, factionKey: string, samplePlayer: {player_id, nickname}}>
    */
   function extractTeams(matchData) {
     const teams = matchData.teams || {};
@@ -87,97 +87,34 @@
       if (faction.type === "bye") continue;
 
       const name = faction.name || faction.nickname || "Unknown";
-      const players = (faction.roster || faction.players || []).map((p) => ({
-        player_id: p.player_id,
-        nickname: p.nickname,
-        faceit_url: "https://www.faceit.com/en/players/" + p.nickname,
-      }));
+      const roster = faction.roster || faction.players || [];
+      if (roster.length === 0) continue;
 
-      result.push({ name, players });
+      result.push({
+        name,
+        factionKey: fk,
+        samplePlayer: { player_id: roster[0].player_id, nickname: roster[0].nickname },
+      });
     }
 
     return result;
   }
 
   /**
-   * Merge substitute players from championship subscriptions into team rosters.
+   * Aggregate stats for all players found on a team across match stats.
+   * Discovers players from the match stats themselves.
    *
    * Args:
-   *   teams: Array<{name: string, players: Array}> — teams from the match.
-   *   subscriptions: Array<object> — championship subscription items.
-   */
-  function mergeSubstitutes(teams, subscriptions) {
-    for (const team of teams) {
-      const teamNameLower = team.name.toLowerCase();
-      const sub = subscriptions.find(
-        (s) => (s.team?.name || "").toLowerCase() === teamNameLower
-      );
-      if (!sub) continue;
-
-      const existingIds = new Set(team.players.map((p) => p.player_id));
-      const allMembers = sub.team?.members || [];
-
-      for (const member of allMembers) {
-        if (existingIds.has(member.user_id)) continue;
-        team.players.push({
-          player_id: member.user_id,
-          nickname: member.nickname,
-          faceit_url: "https://www.faceit.com/en/players/" + member.nickname,
-          isSub: true,
-        });
-      }
-    }
-  }
-
-  /**
-   * Find all match IDs for a team using a single player's history.
-   * Falls back to additional players if the first has no matches.
-   *
-   * Args:
-   *   players: Array<{player_id: string}> — team roster.
-   *   teamName: string — team name to filter by.
-   *   competitionId: string — championship UUID.
-   *
-   * Returns:
-   *   Promise<Array<string>> — deduplicated match IDs for the team.
-   */
-  async function findTeamMatchIds(players, teamName, competitionId, fromTimestamp) {
-    for (const player of players) {
-      const ids = await findTeamMatches(player.player_id, teamName, competitionId, fromTimestamp);
-      if (ids.length > 0) return ids;
-    }
-    return [];
-  }
-
-  /**
-   * Extract stats for all players from already-fetched match stats.
-   *
-   * Args:
-   *   playerIds: Set<string> — player UUIDs to extract.
    *   matchIds: Array<string> — match IDs (stats already cached).
+   *   teamName: string — team name to match (case-insensitive).
    *
    * Returns:
-   *   Map<string, object> — player_id → aggregated stats.
+   *   Array<{nickname, faceit_url, ...stats}> — rows for every player who appeared.
    */
-  async function aggregateAllPlayers(playerIds, matchIds) {
+  async function aggregateTeamPlayers(matchIds, teamName) {
+    const target = teamName.toLowerCase();
     const aggMap = new Map();
-    for (const pid of playerIds) {
-      aggMap.set(pid, {
-        matches: 0,
-        kills: 0,
-        assists: 0,
-        deaths: 0,
-        doubleKills: 0,
-        tripleKills: 0,
-        quadroKills: 0,
-        pentaKills: 0,
-        oneVOneWins: 0,
-        oneVTwoWins: 0,
-        totalDamage: 0,
-        totalRounds: 0,
-        hsKillsEstimate: 0,
-      });
-    }
+    const nickMap = new Map();
 
     for (const matchId of matchIds) {
       const stats = await ESEA.api.fetchMatchStats(matchId);
@@ -187,10 +124,30 @@
         const matchRounds = parseInt(round.round_stats?.Rounds || "0", 10);
 
         for (const team of round.teams || []) {
-          for (const p of team.players || []) {
-            const agg = aggMap.get(p.player_id);
-            if (!agg) continue;
+          const name = (team.team_stats?.Team || "").toLowerCase();
+          if (name !== target) continue;
 
+          for (const p of team.players || []) {
+            if (!aggMap.has(p.player_id)) {
+              aggMap.set(p.player_id, {
+                matches: 0,
+                kills: 0,
+                assists: 0,
+                deaths: 0,
+                doubleKills: 0,
+                tripleKills: 0,
+                quadroKills: 0,
+                pentaKills: 0,
+                oneVOneWins: 0,
+                oneVTwoWins: 0,
+                totalDamage: 0,
+                totalRounds: 0,
+                hsKillsEstimate: 0,
+              });
+              nickMap.set(p.player_id, p.nickname);
+            }
+
+            const agg = aggMap.get(p.player_id);
             const s = p.player_stats || {};
             agg.matches++;
             agg.kills += parseInt(s.Kills || "0", 10);
@@ -213,7 +170,16 @@
       }
     }
 
-    return aggMap;
+    const rows = [];
+    for (const [pid, agg] of aggMap) {
+      const nick = nickMap.get(pid);
+      rows.push({
+        nickname: nick,
+        faceit_url: "https://www.faceit.com/en/players/" + nick,
+        ...agg,
+      });
+    }
+    return rows;
   }
 
   async function loadAllStats(matchId, onProgress) {
@@ -224,11 +190,6 @@
     currentCompetitionName = competitionName;
     const teams = extractTeams(matchData);
 
-    onProgress("Getting current season stats... (loading rosters)");
-    const teamNames = new Set(teams.map((t) => t.name.toLowerCase()));
-    const subscriptions = await ESEA.api.fetchChampionshipSubscriptions(competitionId, teamNames);
-    mergeSubstitutes(teams, subscriptions);
-
     const FOUR_MONTHS_SEC = 4 * 30 * 24 * 60 * 60;
     const matchStartedAt = matchData.started_at || matchData.configured_at || 0;
     const fromTimestamp = matchStartedAt > 0 ? matchStartedAt - FOUR_MONTHS_SEC : 0;
@@ -236,7 +197,7 @@
     onProgress("Getting current season stats... (finding matches)");
     const teamMatchResults = await Promise.all(
       teams.map((team) =>
-        findTeamMatchIds(team.players, team.name, competitionId, fromTimestamp)
+        findTeamMatches(team.samplePlayer.player_id, team.name, competitionId, fromTimestamp)
       )
     );
 
@@ -251,34 +212,10 @@
     );
 
     onProgress("Getting current season stats... (almost done)");
-    const allPlayerIds = new Set();
-    for (const team of teams) {
-      for (const player of team.players) {
-        allPlayerIds.add(player.player_id);
-      }
-    }
-
     const teamResults = [];
     for (let t = 0; t < teams.length; t++) {
-      const team = teams[t];
-      const matchIds = teamMatchResults[t];
-      const aggMap = await aggregateAllPlayers(
-        new Set(team.players.map((p) => p.player_id)),
-        matchIds
-      );
-
-      const rows = [];
-      for (const player of team.players) {
-        const agg = aggMap.get(player.player_id);
-        if (player.isSub && agg.matches === 0) continue;
-
-        rows.push({
-          nickname: player.nickname,
-          faceit_url: player.faceit_url,
-          ...agg,
-        });
-      }
-      teamResults.push({ teamName: team.name, rows });
+      const rows = await aggregateTeamPlayers(teamMatchResults[t], teams[t].name);
+      teamResults.push({ teamName: teams[t].name, rows });
     }
 
     return { competitionName, teamResults };
@@ -406,6 +343,17 @@
     const table = document.createElement("table");
     table.className = "esea-stats-table";
 
+    const colgroup = document.createElement("colgroup");
+    const aliasCol = document.createElement("col");
+    aliasCol.className = "esea-col-alias";
+    colgroup.appendChild(aliasCol);
+    for (let i = 0; i < COLUMNS.length; i++) {
+      const col = document.createElement("col");
+      col.className = "esea-col-stat";
+      colgroup.appendChild(col);
+    }
+    table.appendChild(colgroup);
+
     const thead = document.createElement("thead");
     const headerRow = document.createElement("tr");
 
@@ -508,7 +456,7 @@
   function waitForHeader() {
     return new Promise((resolve) => {
       const check = () => {
-        const header = document.querySelector('[class*="Header__Container-sc"]');
+        const header = document.querySelector('[class*="HeaderWrapper-sc"]');
         if (header) return resolve(header);
         setTimeout(check, 500);
       };
@@ -676,8 +624,8 @@
     return new Promise((resolve) => {
       let attempts = 0;
       const check = () => {
-        const badge = document.querySelector('[class*="Chip"] a[href*="league"]');
-        if (badge && badge.textContent.toLowerCase().includes("esea")) {
+        const badge = document.querySelector('a[href*="league/ESEA"]');
+        if (badge) {
           return resolve(true);
         }
         attempts++;
@@ -738,4 +686,166 @@
 
   poll();
   setInterval(poll, POLL_INTERVAL_MS);
+
+  /* ------------------------------------------------------------------ */
+  /*  Player card league injection                                       */
+  /* ------------------------------------------------------------------ */
+
+  const LEAGUE_BADGE_CLASS = "esea-league-badge";
+  const leagueCache = {};
+
+  /**
+   * Fetch active leagues for a player by nickname.
+   *
+   * Args:
+   *   nickname: string — FACEIT display name.
+   *
+   * Returns:
+   *   Promise<Array<{name: string, team: string}>> — active championships.
+   */
+  async function fetchPlayerLeagues(nickname) {
+    if (leagueCache[nickname] !== undefined) {
+      return leagueCache[nickname];
+    }
+
+    const player = await ESEA.api.fetchPlayerByNickname(nickname);
+    if (!player) {
+      leagueCache[nickname] = [];
+      return [];
+    }
+
+    try {
+      const res = await fetch(
+        "/api/team-leagues/v1/users/" + player.player_id + "/profile/leagues/info",
+        { headers: { accept: "application/json" }, credentials: "include" }
+      );
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+
+      const leagues = [];
+      for (const league of data.payload || []) {
+        const seasons = league.league_seasons_info || [];
+        if (seasons.length === 0) continue;
+        const latest = seasons[0];
+        for (const team of latest.season_teams_info || []) {
+          if (!team.is_active) continue;
+          const standing = team.team_standing || {};
+          const division = standing.division_name || "";
+          const record = standing.wins + "-" + standing.losses;
+          leagues.push({
+            name: "S" + latest.season_number + (division ? " " + division : ""),
+            team: team.premade_team_name || "",
+            teamId: team.premade_team_id || "",
+            record,
+          });
+        }
+      }
+
+      leagueCache[nickname] = leagues;
+      return leagues;
+    } catch (e) {
+      leagueCache[nickname] = [];
+      return [];
+    }
+  }
+
+  /**
+   * Inject league info into a player card popover.
+   *
+   * Args:
+   *   popover: HTMLElement — the popover container element.
+   */
+  async function injectLeagueInfo(popover) {
+    if (popover.querySelector("." + LEAGUE_BADGE_CLASS)) return;
+
+    const nameEl = popover.querySelector('[class*="Name-sc"]');
+    if (!nameEl) return;
+    const nickname = nameEl.textContent.trim();
+    if (!nickname) return;
+
+    const placeholder = document.createElement("div");
+    placeholder.className = LEAGUE_BADGE_CLASS;
+    placeholder.textContent = "Loading leagues...";
+
+    const statsBox = popover.querySelector('[class*="RatingsAndStats__BoxedContainer"]');
+    if (statsBox) {
+      statsBox.parentElement.insertBefore(placeholder, statsBox);
+    } else {
+      const nameContainer = nameEl.closest('[class*="NameContainer"]');
+      if (nameContainer && nameContainer.parentElement) {
+        nameContainer.parentElement.insertBefore(placeholder, nameContainer.nextSibling);
+      } else {
+        return;
+      }
+    }
+
+    try {
+      const leagues = await fetchPlayerLeagues(nickname);
+      if (leagues.length === 0) {
+        placeholder.remove();
+        return;
+      }
+
+      placeholder.textContent = "";
+      for (const league of leagues) {
+        const row = document.createElement("div");
+        row.className = "esea-league-row";
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "esea-league-name";
+        nameSpan.textContent = league.name;
+        row.appendChild(nameSpan);
+        if (league.team) {
+          const teamLink = document.createElement("a");
+          teamLink.className = "esea-league-team";
+          teamLink.textContent = league.team;
+          if (league.record) {
+            const parts = league.record.split("-");
+            const recordSpan = document.createElement("span");
+            recordSpan.className = "esea-league-record";
+            const wins = document.createElement("span");
+            wins.className = "esea-record-wins";
+            wins.textContent = parts[0];
+            const dash = document.createTextNode("-");
+            const losses = document.createElement("span");
+            losses.className = "esea-record-losses";
+            losses.textContent = parts[1];
+            recordSpan.appendChild(document.createTextNode(" ("));
+            recordSpan.appendChild(wins);
+            recordSpan.appendChild(dash);
+            recordSpan.appendChild(losses);
+            recordSpan.appendChild(document.createTextNode(")"));
+            teamLink.appendChild(recordSpan);
+          }
+          teamLink.href = league.teamId
+            ? "https://www.faceit.com/en/teams/" + league.teamId
+            : "#";
+          teamLink.target = "_blank";
+          teamLink.rel = "noopener noreferrer";
+          row.appendChild(teamLink);
+        }
+        placeholder.appendChild(row);
+      }
+    } catch (e) {
+      placeholder.remove();
+    }
+  }
+
+  /**
+   * Observe DOM for player card popovers appearing.
+   */
+  const cardObserver = new MutationObserver(function (mutations) {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        const popover = node.querySelector
+          ? node.querySelector('[class*="PopoverStyled"]') || (node.matches && node.matches('[class*="PopoverStyled"]') ? node : null)
+          : null;
+        if (popover) {
+          injectLeagueInfo(popover);
+        }
+      }
+    }
+  });
+
+  cardObserver.observe(document.body, { childList: true, subtree: true });
 })();

@@ -118,49 +118,31 @@
     }
   }
 
+  const playerCache = {};
+
   /**
-   * Fetch team subscriptions for a championship.
-   * Stops early if all target teams are found.
+   * Look up a player by nickname.
    *
    * Args:
-   *   championshipId: string — the championship UUID.
-   *   targetNames: Set<string>|null — lowercase team names to find. Stops when all found.
+   *   nickname: string — FACEIT display name.
    *
    * Returns:
-   *   Promise<Array<object>> — matching subscription items with team rosters.
+   *   Promise<object|null> — player object, or null on error.
    */
-  async function fetchChampionshipSubscriptions(championshipId, targetNames) {
-    const found = [];
-    const remaining = targetNames ? new Set(targetNames) : null;
-    let offset = 0;
-    const limit = 100;
-
-    while (true) {
-      const url =
-        BASE +
-        "/championships/" +
-        championshipId +
-        "/subscriptions?offset=" +
-        offset +
-        "&limit=" +
-        limit;
-      const data = await throttledFetch(url);
-      const items = data.items || [];
-
-      for (const item of items) {
-        const name = (item.team?.name || "").toLowerCase();
-        if (!remaining || remaining.has(name)) {
-          found.push(item);
-          if (remaining) remaining.delete(name);
-        }
-      }
-
-      if (remaining && remaining.size === 0) break;
-      if (items.length < limit) break;
-      offset += limit;
+  async function fetchPlayerByNickname(nickname) {
+    if (playerCache[nickname] !== undefined) {
+      return playerCache[nickname];
     }
-
-    return found;
+    try {
+      const data = await throttledFetch(
+        BASE + "/players?nickname=" + encodeURIComponent(nickname)
+      );
+      playerCache[nickname] = data;
+      return data;
+    } catch (e) {
+      playerCache[nickname] = null;
+      return null;
+    }
   }
 
   window.ESEA = window.ESEA || {};
@@ -168,6 +150,6 @@
     fetchMatch,
     fetchPlayerHistory,
     fetchMatchStats,
-    fetchChampionshipSubscriptions,
+    fetchPlayerByNickname,
   };
 })();
